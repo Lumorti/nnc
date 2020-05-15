@@ -1,0 +1,328 @@
+#! /usr/bin/python3
+
+import sys
+from PIL import Image, ImageDraw
+from pathlib import Path
+import numpy as np
+
+import os
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+
+import tensorflow as tf
+tf.keras.backend.set_floatx("float64")
+
+nncSettings = {
+
+    # Affecting all
+    "kernelSize": 5,
+    "stripMethod": "grid",
+    "stripColor": (255, 255, 255),
+    "edgeColor": (0, 0, 0),
+    "ratio": 2,
+    "everyX": 1,
+    "everyY": 2,
+
+    # Affecting training only
+    "modelFile": "nncData.h5",
+    "epochs": 10,
+    "maxPerImage": 50000,
+
+}
+
+# Strip an image
+def compress(files):
+
+    # Cache for speed
+    lineSpacing = int(float(nncSettings["ratio"]) / float(nncSettings["ratio"]-1))
+    bonusLineLength = 3
+
+    # Check for any inconsistancies
+    if nncSettings["ratio"] > 2 and nncSettings["stripMethod"] == ["horiz"]:
+        print("ERROR - can't compress with ratio > 2 for line stripping, edit the nncSettings")
+        exit()
+
+    # Loop over the non-nnc files listed
+    for fileName in files:
+        if ".nnc" not in fileName:
+
+            newFileName = fileName[:fileName.find(".")] + ".nnc"
+            print("compressing " + fileName + " -> " + newFileName)
+
+            # Load the uncompressed image
+            img = Image.open(fileName)
+
+            # Get the drawing object from the image
+            draw = ImageDraw.Draw(img)
+
+            # If using horizontal line stripping
+            if nncSettings["stripMethod"] == "horiz":
+
+                for i in range(1, 1+int(img.size[1] / lineSpacing)):
+                    y = i*lineSpacing
+                    if y > img.size[1]: break
+                    draw.line((0, y, img.size[0], y), fill=nncSettings["stripColor"])
+
+                # Save the compressed file
+                img.save(newFileName, "png")
+
+            # If using horizontal plus
+            elif nncSettings["stripMethod"] == "horiz+":
+
+                for i in range(2, 1+int(img.size[1] / lineSpacing)):
+                    y = i*lineSpacing
+                    if y > img.size[1]: break
+                    draw.line((0, y, img.size[0], y), fill=nncSettings["stripColor"])
+                    for x in range(0, img.size[0], bonusLineLength*2):
+                        draw.line((x, y-1, x+bonusLineLength-1, y-1), fill=nncSettings["stripColor"])
+
+                # Save the compressed file
+                img.save(newFileName, "png")
+
+            # TODO
+            elif nncSettings["stripMethod"] == "grid":
+
+                imgMin = Image.new('RGB', (int(img.size[0]/nncSettings["everyX"]), int(img.size[1]/nncSettings["everyY"])), nncSettings["edgeColor"])
+                imgData = np.array(img)
+                imgMinData = np.array(imgMin)
+
+                for x in range(0, img.size[0]-1, nncSettings["everyX"]):
+                    for y in range(0, img.size[1]-1, nncSettings["everyY"]):
+
+                        imgMinData[int(y/nncSettings["everyY"]), int(x/nncSettings["everyX"]), :] = np.array(imgData[y, x, :])
+
+                imgMin = Image.fromarray(imgMinData)
+                imgMin.save(newFileName, "png")
+
+# Train on image data
+def train(files):
+
+    # Create a new model
+    nncNet = tf.keras.models.Sequential([
+        tf.keras.layers.Flatten(input_shape=(nncSettings["kernelSize"], nncSettings["kernelSize"], 3)),
+        tf.keras.layers.Dense(256, activation='relu'),
+        tf.keras.layers.Dropout(0.2),
+        tf.keras.layers.Dense(3)
+    ])
+
+    # Arrays for the training data (converted to np arrays later)
+    inputs = []
+    outputs = []
+
+    # Cache for speed
+    width = nncSettings["kernelSize"]
+    halfWidth = int((width - 1) / 2)
+    stripColorNP = np.array(nncSettings["stripColor"]) / 255.0
+
+    # Compress the files to get the training data
+    compress(files)
+
+    # Loop over the non-nnc files
+    for fileName in files:
+        ext = fileName[fileName.find(".")+1:]
+        if ext in ["png", "jpg", "jpeg"]:
+
+            print("loading data from " + fileName)
+
+            # Load the original file
+            img = Image.open(fileName)
+            imgStripped = Image.open(fileName[:-3] + "nnc")
+
+            # Add padding around the edges
+            imgPad = Image.new('RGB', (img.size[0]+width-1, img.size[1]+width-1), nncSettings["edgeColor"])
+            imgPad.paste(img, (halfWidth, halfWidth))
+            imgPadStripped = Image.new('RGB', (img.size[0]+width-1, img.size[1]+width-1), nncSettings["edgeColor"])
+            imgPadStripped.paste(imgStripped, (halfWidth, halfWidth))
+
+            # Convert it to a 2D (y,x) numpy array
+            imgData = np.array(imgPad.getdata()).reshape((imgPad.size[1], imgPad.size[0], 3)) / 255.0
+            imgDataStripped = np.array(imgPadStripped.getdata()).reshape((imgPadStripped.size[1], imgPadStripped.size[0], 3)) / 255.0
+
+            # Keep track of how many samples have been gathered from the image
+            numFromImage = 0
+
+            # For each pixel 
+            for y in range(halfWidth, imgPad.size[1]-halfWidth, 1):
+                for x in range(halfWidth, imgPad.size[0]-halfWidth, 1):
+
+                    # If this pixel would normally need to be interpolated
+                    if np.array_equal(imgDataStripped[y, x, 0:3], stripColorNP):
+
+                        # Get the width by width by 3 matrix of pixels around it
+                        grid = np.array(imgDataStripped[y-halfWidth:y+halfWidth+1, x-halfWidth:x+halfWidth+1, 0:3])
+
+                        # Add the center pixel to the outputs
+                        outputs.append(np.array(imgData[y, x, 0:3]))
+
+                        # Add the grid to the inputs
+                        inputs.append(grid)
+
+                        numFromImage += 1
+                        if numFromImage > nncSettings["maxPerImage"]:
+                            break
+
+                if numFromImage > nncSettings["maxPerImage"]:
+                    break
+
+    # Convert them to numpy arrays
+    inputs = np.array(inputs)
+    outputs = np.array(outputs)
+
+    print("loaded " + str(len(inputs)) + " pairs total")
+
+    # Set up the loss function
+    lossFunction = tf.keras.losses.MeanAbsoluteError()
+    optimiser = tf.keras.optimizers.Adam(learning_rate=0.0001)
+
+    # Compile the model
+    nncNet.compile(optimizer=optimiser, loss=lossFunction, metrics=['accuracy'])
+
+    # Train the model
+    nncNet.fit(inputs, outputs, epochs=nncSettings["epochs"])
+
+    # Save the model
+    nncNet.save(nncSettings["modelFile"])
+
+# Decompress an image
+def decompress(files):
+    
+    # Load the model if it exists
+    path = os.path.realpath(__file__)[:-3] + nncSettings["modelFile"]
+    if os.path.exists(path):
+        nncNet = tf.keras.models.load_model(path)
+    else:
+        print("ERROR - missing the model file")
+        exit()
+
+    # Cache for speed
+    width = nncSettings["kernelSize"]
+    lineSpacing = int(float(nncSettings["ratio"]) / float(nncSettings["ratio"]-1))
+    halfWidth = int((width - 1) / 2)
+
+    for fileName in files:
+
+        if ".nnc" in fileName:
+
+            # New file name is the .png of the old one
+            newFileName = fileName[:fileName.find(".")] + ".png"
+            print("decompressing " + fileName + " -> " + newFileName)
+ 
+            # Load the file
+            img = Image.open(fileName)
+
+            # Add padding around the edges
+            imgPad = Image.new('RGB', (img.size[0]+width-1, img.size[1]+width-1), nncSettings["edgeColor"])
+            imgPad.paste(img, (halfWidth, halfWidth))
+
+            # Convert it to a 2D (y,x) numpy array
+            imgDataVectors = imgPad.getdata()
+            imgData = np.array(imgDataVectors).reshape((-1, imgPad.size[0], 3)) / 255.0
+
+            mapping = []
+            toEval = []
+
+            # If using horizontal line stripping
+            if nncSettings["stripMethod"] == "horiz":
+
+                # Loop over each line that would be drawn when compressing
+                for i in range(1, 1+int(img.size[1] / lineSpacing)):
+
+                    y = halfWidth + i*lineSpacing
+                    if y > img.size[1]: break
+
+                    # For each pixel along the line
+                    for x in range(halfWidth, imgPad.size[0]-halfWidth, 1):
+
+                        # Get the width by width matrix of pixels around it
+                        grid = np.array(imgData[y-halfWidth:y+halfWidth+1, x-halfWidth:x+halfWidth+1, 0:3])
+
+                        # Add the grid to list of things to evaluate using the net
+                        toEval.append(grid)
+                        mapping.append((y, x))
+
+            # If using horizontal plus
+            elif nncSettings["stripMethod"] == "horiz+":
+
+                for i in range(2, 1+int(img.size[1] / lineSpacing)):
+
+                    y = halfWidth + i*lineSpacing
+                    if y > img.size[1]: break
+
+                    # For each pixel along the line
+                    for x in range(halfWidth, imgPad.size[0]-halfWidth, 1):
+
+                        # Get the width by width matrix of pixels around it
+                        grid = np.array(imgData[y-halfWidth:y+halfWidth+1, x-halfWidth:x+halfWidth+1, 0:3])
+
+                        # Add the grid to list of things to evaluate using the net
+                        toEval.append(grid)
+                        mapping.append((y, x))
+
+                    y -= 1
+
+                    # For each pixel along the line
+                    for x in range(halfWidth, imgPad.size[0]-halfWidth, 1):
+
+                        # Get the width by width matrix of pixels around it
+                        grid = np.array(imgData[y-halfWidth:y+halfWidth+1, x-halfWidth:x+halfWidth+1, 0:3])
+
+                        # Add the grid to list of things to evaluate using the net
+                        toEval.append(grid)
+                        mapping.append((y, x))
+
+            # Use the net to get the predictions
+            predictions = nncNet(np.array(toEval)).numpy()
+
+            # Set the pixels using these predictions
+            for index, coord in enumerate(mapping):
+                imgData[coord[0], coord[1], 0:3] = predictions[index, 0:3] 
+
+            # Put the modified pixels back into the image object
+            converted = tuple(map(tuple, (imgData * 255.0).astype(int).reshape((-1, 3)).tolist()))
+            imgPad.putdata(converted)
+
+            # Crop out the whitespace
+            newImg = imgPad.crop((halfWidth, halfWidth, imgPad.size[0]-halfWidth, imgPad.size[1]-halfWidth))
+
+            # Save it
+            newImg.save(newFileName, "png")
+
+if __name__ == "__main__":
+
+    task = "help"
+    files = []
+    for arg in sys.argv[1:]:
+
+        if arg in ["-c", "--compress"]:
+            task = "compress"
+        elif arg in ["-d", "--decompress"]:
+            task = "decompress"
+        elif arg in ["-t", "--train"]:
+            task = "train"
+        elif arg in ["-h", "--help"]:
+            task = "help"
+        else:
+            files.append(arg)
+
+    if task == "help":
+
+        print("NNC - Neural Net Compression")
+        print("Usage: nnc [flags] [files]")
+        print("")
+        print("Flags")
+        print("-h --help        print this message")
+        print("-c --compress    compress the images")
+        print("-d --decompress  decompress the images")
+        print("-t --train       train the neural net on uncompressed images")
+
+    elif task == "compress":
+
+        compress(files)
+
+    elif task == "decompress":
+
+        decompress(files)
+
+    elif task == "train":
+
+        train(files)
+
