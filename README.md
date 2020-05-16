@@ -4,11 +4,13 @@
 
 A proof-of-concept image compression format utilising a neural network.
 
-Since the png file format uses run-length compression, by using a solid colour to erase sections of an image a photograph can be saved as a lossless png. 
-Since the line locations are fixed the image can be repeatendly decompressed/compressed without causing loss like with jpeg.
-When the original image is required (for viewing or otherwise) a neural network is applied to draw in the missing pixels. 
+By removing data in predefined places the resulting file is saved as a png with a lower file size than the original.
+Since the line locations are fixed the image can be repeatedly compressed/decompressed without causing further data loss like with jpeg.
+When the original image is required (for viewing or otherwise) a neural network is applied to draw in the missing pixels, effectively upscaling. 
 
 All photos are licensed under the [Pixabay license](https://pixabay.com/service/license/) which allows noncommercial distribution.
+
+### Efficiency
 
 ### Example
 
