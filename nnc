@@ -14,18 +14,17 @@ tf.keras.backend.set_floatx("float64")
 
 nncSettings = {
 
-    # Affecting all
-    "kernelSize": 7,
+    # Changing any of these requires retraining/recompressing
+    "kernelSize": 5,
     "stripMethod": "grid",
     "stripColor": (255, 255, 255),
-    "edgeColor": (0, 0, 0),
-    "everyX": 2,
+    "edgeColor": (255, 255, 255),
+    "everyX": 1,
     "everyY": 2,
-
-    # Affecting training only
+    "middleLayerSize": 256,
     "modelFile": "nncData.h5",
-    "epochs": 15,
-    "maxPerImage": 100000,
+    "epochs": 10,
+    "maxPerImage": 300000,
 
 }
 
@@ -63,7 +62,7 @@ def train(files):
     # Create a new model
     nncNet = tf.keras.models.Sequential([
         tf.keras.layers.Flatten(input_shape=(nncSettings["kernelSize"], nncSettings["kernelSize"], 3)),
-        tf.keras.layers.Dense(128, activation='relu'),
+        tf.keras.layers.Dense(nncSettings["middleLayerSize"], activation='relu'),
         tf.keras.layers.Dropout(0.2),
         tf.keras.layers.Dense(3)
     ])
